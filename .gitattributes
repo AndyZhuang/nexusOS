@@ -1,0 +1,17 @@
+# 本项目是 Linux 目标（WSL2 / Ubuntu 裸机），仓库内文本一律 LF。
+# 没有这条时，Windows 上 core.autocrlf=true 会把 LF 转成 CRLF，
+# 导致 clone 后的 shell 脚本出现 `#!/usr/bin/env bash\r` 而无法执行。
+* text=auto eol=lf
+
+# 明确保持二进制的
+*.deb   binary
+*.gz    binary
+*.zip   binary
+*.png   binary
+*.jpg   binary
+*.pdf   binary
+
+# 签名与校验文件按文本处理
+*.sha256 text eol=lf
+*.sig   text eol=lf
+*.pub   text eol=lf
