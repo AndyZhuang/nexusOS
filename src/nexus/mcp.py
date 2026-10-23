@@ -18,7 +18,7 @@ import sys
 import time
 from typing import Any, Callable
 
-from . import audit, config
+from . import audit, config, permissions
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "nexus-mcp", "version": "0.2.0"}
@@ -28,18 +28,21 @@ SERVER_INFO = {"name": "nexus-mcp", "version": "0.2.0"}
 
 
 class Policy:
-    """工具层策略。默认可读系统目录、可写仅限 nexus 数据区。"""
+    """工具层策略。
 
-    def __init__(self, data: dict | None = None) -> None:
-        d = data or config.load_layered("policy.toml", {})
-        self.read_roots: list[str] = d.get("read_roots") or ["/", str(config.data_home())]
-        self.write_roots: list[str] = d.get("write_roots") or [str(config.data_home())]
-        self.denied_commands: list[str] = d.get("denied_commands") or [
-            r"\brm\s+(-[a-zA-Z]*\s+)*/(\s|$)", r":\(\)\s*\{", r"mkfs", r"dd\s+if=.*of=/dev/",
-            r"shutdown", r"reboot", r">\s*/dev/sd[a-z]",
-        ]
-        self.allow_shell: bool = bool(d.get("allow_shell", True))
-        self.allow_restart: bool = bool(d.get("allow_restart", True))
+    档位（tier）由 permissions 模块统一决定可读根/可写根/命令黑名单；
+    policy.toml 里显式写的字段优先于档位默认值。
+    """
+
+    def __init__(self, data: dict | None = None, tier: str | None = None) -> None:
+        raw = data if data else config.load_layered("policy.toml", {})
+        pol = permissions.policy_for(tier, raw)
+        self.tier: str = pol["tier"]
+        self.read_roots: list[str] = pol["read_roots"]
+        self.write_roots: list[str] = pol["write_roots"]
+        self.denied_commands: list[str] = pol["denied_commands"]
+        self.allow_shell: bool = pol["allow_shell"]
+        self.allow_restart: bool = pol["allow_restart"]
 
     def can_read(self, path: str) -> bool:
         return self._under(path, self.read_roots)
@@ -138,7 +141,8 @@ class ToolRegistry:
         def fs_write(args):
             p = _p(args)
             if not self.policy.can_write(str(p)):
-                raise ToolError(f"策略拒绝写入 {p}（可写根: {self.policy.write_roots}）")
+                raise ToolError(f"策略拒绝写入 {p}（档位 {self.policy.tier}，"
+                                f"可写根: {self.policy.write_roots}）")
             p.parent.mkdir(parents=True, exist_ok=True)
             content = args.get("content", "")
             mode = args.get("mode", "w")

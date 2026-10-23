@@ -14,7 +14,11 @@
 wsl -d Ubuntu
 ```
 
-进去之后所有命令直接可用：
+进去之后所有命令直接可用。
+
+**第一次进来**：直接敲 `nexus`（不带参数）就会走一遍新手引导 ——
+6 步，每一步都**真的执行命令并展示真实输出**，约 30 秒。
+想重看：`nexus tutorial`；想清进度重来：`nexus tutorial --reset`。
 
 ```bash
 nexus status
@@ -162,6 +166,32 @@ ReadWritePaths=… / NoNewPrivileges / PrivateTmp / 内存上限…），
 
 **证明**：边界是**内核级**的，不是提示词里写"请不要删文件"。
 
+### 实验 8b · 权限档位 ⭐（0.3.0 新增）
+
+```bash
+nexus permissions          # 当前档位 + 可写根 + 沙箱属性
+nexus permissions list     # 四个档位一览
+```
+
+**预期**：显示当前是 `standard`（标准），可写根含 `/home/andy`，
+沙箱属性里有 `ReadWritePaths=/home/andy`。
+
+**证明**：权限不是写死的，是**可分档调节**的。一个档位同时驱动沙箱层和工具策略层，
+两层不会再各说各话。
+
+验证档位真的生效（同一请求，两档两结果）：
+
+```bash
+# 默认档：能写自己的家目录
+nexus "在 ~/nexus-probe.txt 写一行 hello"     # → 成功
+
+# 临时收紧到 strict：内核层直接拦
+NEXUS_TIER=strict nexus "在 ~/nexus-probe.txt 写一行 hello"
+# → Errno 30 Read-only file system（内核只读挂载，不是软件层的"策略拒绝"）
+```
+
+`strict` 下报的是 `OSError` 而不是"策略拒绝"——这个差别就是双层边界的证据。
+
 ---
 
 ## 3. 破坏性实验（最有说服力）
@@ -270,19 +300,33 @@ curl -s http://127.0.0.1:8080/healthz | head -c 200
 
 ### 7.1 这东西会动你的系统吗？
 
-**默认不会。** 具体边界：
+**会，而且这是刻意的。** 默认档位是 `standard`：agent 能改你的家目录
+（包括项目代码），能执行 shell 命令，能联网。**系统目录（`/etc`、`/usr`）仍然只读**。
 
 | 方面 | 实际情况 |
 |---|---|
-| 需要 root 吗 | **不需要**。全部在 `~/.local/share/nexus` 与 `~/.config/nexus` |
-| 改 `/etc`、`/usr` 吗 | **不会**。systemd 沙箱 `ProtectSystem=strict` + `ProtectHome=read-only` |
-| 装系统包吗 | **不会**。零第三方依赖，不碰 apt |
-| 开机自启吗 | 会（`systemd --user` + linger，你已开过 linger）。不想自启就 `systemctl --user disable nexus-*` |
-| 会读你的文件吗 | agent 有 `fs.read` 能力且**可读全系统**（`read_roots = ["/"]`）—— 想更严就改 `~/.config/nexus/policy.toml` 的 `read_roots` |
-| 网络 | agent 沙箱允许 `AF_INET`（本地 Ollama 需要）。云端 API 需要外网 |
+| 需要 root 吗 | **不需要**。全程 `systemd --user` + 沙箱，不碰系统单元 |
+| 改 `/etc`、`/usr` 吗 | **不会**。沙箱 `ProtectSystem=strict`，系统目录只读挂载 |
+| 改你的家目录？ | **会**（默认 `standard` 档）。这是它能干活的前提 |
+| 装系统包？ | 不会。无 root、无外网、也不碰 apt |
+| 开机自启？ | 会（`systemd --user` + linger，你已开过 linger）。不想自启就 `systemctl --user disable nexus-*` |
+| 危险命令？ | `rm -rf /`、`mkfs`、`dd` 写裸盘等**所有档位都拦** |
+| 网络 | 允许 `AF_INET`（本地 Ollama 需要）。云端 API 需要外网 |
+| 想更严 | `nexus permissions set strict` —— 只剩 nexus 数据区可写 |
+
+**当前档位随时可查可改：**
+
+```bash
+nexus permissions            # 看当前档位与可写根
+nexus permissions list       # 四个档位一览
+nexus permissions set strict # 收紧（共享机器建议用这个）
+nexus permissions set open   # 放开（/etc 等也可写，谨慎）
+```
+
+完整模型见 `docs/05-PERMISSIONS.md`。
 
 **唯一真正的资源消耗是 GPU 显存**：本地 agent 跑一次会把 `dolphin3:8b`（约 5GB）驻留进显存。
-如果你正在用 ComfyUI 跑图，这是**直接冲突**。跑完手动释放：
+如果你正在用 ComfyUI 跑图，这是**直接冲突**（WSL 与 Windows 共享同一块显存）。跑完手动释放：
 
 ```bash
 nexus models unload dolphin3:8b

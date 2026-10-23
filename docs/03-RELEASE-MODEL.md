@@ -210,7 +210,7 @@ ISO 内嵌离线包镜像，让装机不依赖网络。
 ```
 
 **发布前必须做的三件事**：
-1. `git init` + 提交 + 推到 GitHub（仓库名建议 `nexusos/nexusos`）
+1. `git init` + 提交 + 推到 GitHub（仓库名建议 `AndyZhuang/nexusOS`）
 2. 配好 GPG 密钥与 `secrets.GPG_PRIVATE_KEY` / `secrets.GPG_KEY_ID`
 3. 确认 `NEXUS_REPO` / `NEXUS_BASE_URL` 与真实仓库地址一致
 
@@ -220,7 +220,7 @@ ISO 内嵌离线包镜像，让装机不依赖网络。
 
 | 决定 | 选项 | 我的建议 |
 |---|---|---|
-| 仓库名与归属 | `nexusos/nexusos` / 个人名下 | 先用个人名下，验证有人用再谈组织 |
+| 仓库名与归属 | `AndyZhuang/nexusOS` / 个人名下 | 先用个人名下，验证有人用再谈组织 |
 | 硬件兼容矩阵 | 只支持 NVIDIA / 也支持 AMD | 先只支持 NVIDIA（本地推理刚需），明确写在 README 顶部 |
 | 是否做 ISO | 现在做 / 有 10 个用户再做 | **等**。先把阶段 A/B 跑通，ISO 是最后一步 |
 

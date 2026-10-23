@@ -18,13 +18,14 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import pathlib
 import re
 import shutil
 import subprocess
 import time
 from typing import Any
 
-from . import audit, config, sandbox
+from . import audit, config, permissions, sandbox
 from .broker import Broker, gpu_state
 from .mcp import MCPClient, Policy, ToolRegistry
 from .registry import Registry, current_registry
@@ -330,6 +331,9 @@ class LocalAdapter(Adapter):
                                error="注册表为空，没有可用模型")
         model = entry.name
 
+        # 按本次的档位重建工具策略（可写根随档位变化）
+        self.client = MCPClient(ToolRegistry(Policy(tier=sandbox_tier)))
+
         # 显存仲裁：加载前先问 broker
         verdict = Broker().fit(entry)
         if verdict["fit"] == "cpu":
@@ -423,16 +427,18 @@ class CliAdapter(Adapter):
     def available(self) -> bool:
         return self.path is not None
 
-    def run(self, task: str, *, sandbox_tier: str = "strict", **kw) -> AgentResult:
+    def run(self, task: str, *, sandbox_tier: str = "standard", **kw) -> AgentResult:
         if not self.available():
             return AgentResult(ok=False, adapter=self.name,
                                error=f"未找到 {self.binary}（有外网时可安装或用 mise 懒加载）")
         started = time.time()
         prompt = task
+        # 已经在沙箱子进程里就别再套一层（外层已经用目标档位起好了）
+        inner_tier = "off" if os.environ.get(SANDBOX_CHILD_ENV) else sandbox_tier
         rc, out, err = sandbox.run_sandboxed(
             [self.path] + self.extra_args + ["-p", prompt],
-            tier=sandbox_tier, timeout=900)
-        audit.record("agent.cli", binary=self.binary, rc=rc, tier=sandbox_tier)
+            tier=inner_tier, timeout=900)
+        audit.record("agent.cli", binary=self.binary, rc=rc, tier=inner_tier)
         return AgentResult(ok=rc == 0, output=out or err, adapter=self.name,
                            iterations=1, error=None if rc == 0 else f"exit {rc}",
                            duration_ms=int((time.time() - started) * 1000))
@@ -447,9 +453,9 @@ class MockAdapter(Adapter):
     name = "mock"
     available_flag = True
 
-    def run(self, task: str, *, sandbox_tier: str = "strict", **kw) -> AgentResult:
+    def run(self, task: str, *, sandbox_tier: str = "standard", **kw) -> AgentResult:
         started = time.time()
-        client = MCPClient(ToolRegistry(Policy()))
+        client = MCPClient(ToolRegistry(Policy(tier=sandbox_tier)))
         seq = [
             ("gpu.snapshot", {}),
             ("sysd.list", {}),
@@ -483,25 +489,108 @@ def get_adapter(name: str) -> Adapter:
 
 # ---------------------------------------------------------------- 运行入口
 
+# 沙箱子进程标记：设了这个变量就说明已经在沙箱里，不要再套一层
+SANDBOX_CHILD_ENV = "NEXUS_SANDBOX_CHILD"
 
-def run_agent(task: str, *, adapter: str = "local", sandbox_tier: str = "strict",
+
+def _child_env() -> dict[str, str]:
+    """传给沙箱子进程的环境。必须显式带全，否则 systemd 单元里 PATH 是残的。"""
+    path = os.environ.get("PATH", "")
+    extra = "/usr/lib/wsl/lib"  # WSL 下 nvidia-smi 在这里，不在 PATH
+    if extra not in path:
+        path = path + ":" + extra
+    env = {
+        "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
+        "NEXUS_DATA_HOME": str(config.data_home()),
+        "NEXUS_CONFIG_HOME": str(config.config_home()),
+        "HOME": str(pathlib.Path.home()),
+        "PATH": path,
+        SANDBOX_CHILD_ENV: "1",
+    }
+    return {k: v for k, v in env.items() if v}
+
+
+def run_in_sandbox_child(task: str, adapter: str, model: str | None,
+                         max_iterations: int, tier: str) -> AgentResult:
+    """把整个 agent 进程放进 systemd 沙箱再跑。
+
+    为什么必须这样：v0.2 里 local 适配器的工具调用是在 nexus 主进程内直接执行的，
+    sandbox_tier 只是个记录参数 —— 所谓"双层边界"实际只有 MCP 策略层一层。
+    把 agent 进程整体塞进 systemd-run 之后，内核级的 ProtectSystem/ProtectHome
+    才真正对工具调用生效，档位才有意义。
+    """
+    started = time.time()
+    exe = shutil.which("systemd-run") or "/usr/bin/systemd-run"
+    python = shutil.which("python3") or "python3"
+    props = sandbox.build_properties(tier)
+
+    argv = [exe, "--user", "--quiet", "--wait", "--pipe", "--collect"]
+    for p in props:
+        argv += ["-p", p]
+    env = _child_env()
+    for k, v in env.items():
+        argv += ["--setenv", f"{k}={v}"]
+    argv += ["--", python, "-m", "nexus.cli", "__agent-child"]
+
+    payload = json.dumps({"task": task, "adapter": adapter, "model": model,
+                          "max_iterations": max_iterations}, ensure_ascii=False)
+    result_file = config.state_dir() / "agent-result.json"
+    try:
+        result_file.unlink()
+    except OSError:
+        pass
+
+    rc, out, err = config.run(argv, timeout=1800, env=env, stdin_data=payload)
+    if result_file.exists():
+        try:
+            data = json.loads(result_file.read_text(encoding="utf-8"))
+            return AgentResult(**data)
+        except Exception as exc:
+            return AgentResult(ok=False, adapter=adapter,
+                               error=f"沙箱子进程结果解析失败: {exc}",
+                               duration_ms=int((time.time() - started) * 1000))
+    tail = (err or out or "").strip()[-1200:]
+    return AgentResult(ok=False, adapter=adapter,
+                       error=f"沙箱子进程未产出结果 (rc={rc})\n{tail}",
+                       duration_ms=int((time.time() - started) * 1000))
+
+
+def run_agent(task: str, *, adapter: str = "local",
+              sandbox_tier: str | None = None,
               model: str | None = None, max_iterations: int = 6,
               save_session: bool = True) -> AgentResult:
-    """统一入口：选适配器 → 执行 → 落会话与审计。"""
-    if sandbox_tier != "off":
-        audit.record("agent.run", task=task[:200], adapter=adapter, tier=sandbox_tier)
+    """统一入口：选适配器 → （进沙箱）→ 执行 → 落会话与审计。"""
+    tier = sandbox_tier or permissions.resolve_tier()
+    if tier not in permissions.TIERS:
+        tier = permissions.DEFAULT_TIER
+
+    if tier != "off":
+        audit.record("agent.run", task=task[:200], adapter=adapter, tier=tier)
     else:
         audit.record("agent.run.unsafe", task=task[:200], adapter=adapter,
                      note="显式放开沙箱边界")
+
+    in_child = bool(os.environ.get(SANDBOX_CHILD_ENV))
+    if tier != "off" and not in_child and sandbox.systemd_run_available():
+        # 父进程不进沙箱，改为派生子进程在沙箱里跑真正的 agent 循环
+        result = run_in_sandbox_child(task, adapter, model, max_iterations, tier)
+        audit.record("agent.result", adapter=adapter, ok=result.ok,
+                     iterations=result.iterations,
+                     tools=[c["tool"] for c in result.tool_calls],
+                     duration_ms=result.duration_ms, error=result.error, tier=tier)
+        if save_session:
+            save_session_record(task, result)
+        return result
+
     adp = get_adapter(adapter)
     if not adp.available():
         return AgentResult(ok=False, adapter=adapter,
                            error=f"适配器 {adapter} 不可用（local 需要 ollama 后端在线）")
-    result = adp.run(task, sandbox_tier=sandbox_tier, model=model,
+    result = adp.run(task, sandbox_tier=tier, model=model,
                       max_iterations=max_iterations)
     audit.record("agent.result", adapter=adapter, ok=result.ok,
                  iterations=result.iterations, tools=[c["tool"] for c in result.tool_calls],
-                 duration_ms=result.duration_ms, error=result.error)
+                 duration_ms=result.duration_ms, error=result.error, tier=tier)
     if save_session:
         save_session_record(task, result)
     return result

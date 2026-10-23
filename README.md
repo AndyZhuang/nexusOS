@@ -1,7 +1,8 @@
-# NexusOS 0.2
+# NexusOS 0.3
 
 > AI 原生的个人 AI 工作站系统层 —— rootless-first，零第三方依赖。
 > 设计定稿：`docs/01-NexusOS-Design-v0.2.md` ｜ 设计评审：`docs/00-DESIGN-REVIEW.md`
+> 权限模型：`docs/05-PERMISSIONS.md` ｜ 试玩手册：`docs/04-PLAYBOOK.md`
 
 ---
 
@@ -12,7 +13,8 @@
 - **系统事件反向驱动 agent** —— 崩溃 / GPU OOM / 单元失败 / 磁盘满 → 自动唤醒 agent 采集事实快照 → 给出根因与修复步骤
 - **对话式控制面** —— `nexus "把显存压到 8G 以下"` 让 agent 真的去改系统状态，而不是给建议
 - **资源仲裁** —— 模型注册表是唯一真相源，显存预算内独占加载，超预算拒绝并给可执行建议
-- **内核级信任边界** —— agent 跑在 systemd 沙箱里（只读系统目录 + 仅 nexus 数据区可写），不是提示词级的"软约束"
+- **内核级信任边界** —— agent 跑在 systemd 沙箱里，系统目录只读挂载；权限按**四档**可调，不是提示词级的"软约束"
+- **新手引导** —— 第一次进来 `nexus` 就走一遍带真实输出的上手流程
 
 设计对标 Omarchy 的**操作系统哲学与系统级集成**，而不是它的包管理。
 
@@ -25,13 +27,14 @@ git clone <repo> && cd nexusOS
 bash install/nexus-bootstrap        # 幂等安装，无需 root
 export PATH="$HOME/.local/bin:$PATH"
 
-nexus status                 # 系统总览
-nexus gpu                    # 显存 + 模型适配判定
-nexus models list            # 模型注册表
-nexus mcp test               # MCP 协议自检（26 个工具）
-nexus events list            # 事件规则表
-nexus events test crash      # 事件 → 事实快照 → agent 诊断 全链路
-nexus "现在显卡占了多少显存？"  # 对话式控制面
+nexus                             # 新手引导（6 步，每步真跑真输出）
+nexus status                      # 系统总览
+nexus gpu                         # 显存 + 模型适配判定
+nexus models list                 # 模型注册表
+nexus permissions                 # 当前权限档位与可写根
+nexus mcp test                    # MCP 协议自检（26 个工具）
+nexus events test crash           # 事件 → 事实快照 → agent 诊断 全链路
+nexus "现在显卡占了多少显存？"     # 对话式控制面
 ```
 
 ---
@@ -88,6 +91,8 @@ nexus events follow             跟随 journald 实时诊断
 nexus agent "<任务>"            直接调用 agent（--adapter local|cli|mock）
 nexus "<自然语言>"               对话式控制面
 nexus mcp list|test             MCP 工具清单 / 协议自检
+nexus permissions [show|list|set <档位>]   权限档位管理
+nexus tutorial [--reset]        新手引导（每步真跑真输出）
 nexus audit                     审计统计
 nexus logs audit|events|router  日志
 nexus reset [--dry-run]         回到底层基底
@@ -121,21 +126,43 @@ $XDG_CONFIG_HOME/nexus/
 
 ## 信任边界
 
-```
-默认（tier=strict）
-  ✓ ProtectSystem=strict     系统目录只读
-  ✓ ProtectHome=read-only    家目录只读
-  ✓ ReadWritePaths=          仅 nexus 数据区/配置区可写
-  ✓ PrivateTmp / PrivateDevices / NoNewPrivileges
-  ✓ 危险命令不阻断，但在沙箱内没有 root 能力
-  ✓ 全程审计 JSONL
+权限按**档位**管理，一个档位同时驱动沙箱层与工具策略层，两层不会各说各话。
 
-放开（显式、可审计）
-  nexus --tier off           → 记录为 agent.run.unsafe
-  policy.toml allow_restart  → 单元重启权限
+```
+                 nexus permissions set open
+                             │
+                             ▼
+                        tier（档位）
+                       ╱          ╲
+          systemd 沙箱属性      MCP 工具策略
+          （内核级强制）        （软件层拦截）
 ```
 
-MCP 工具层是**第二道**边界：`fs.write` 到 `/etc` 会被策略直接拒绝，与沙箱无关。
+| 档位 | 可写根 | 适用 |
+|---|---|---|
+| `strict` | 仅 nexus 数据区 | 共享机器 / 多租户 |
+| `standard` | **家目录**（含项目代码） | 单人工作站（**默认**） |
+| `open` | 家目录 + `/etc` `/opt` `/srv` `/usr/local` | 完全托付 |
+| `off` | `/` | 调试 |
+
+```bash
+nexus permissions           # 看当前档位与边界
+nexus permissions list      # 四个档位一览
+nexus permissions set open  # 切档
+```
+
+所有档位共有：
+
+- `ProtectSystem=strict` —— 系统目录只读挂载（`/etc` `/usr` 写不了）
+- `NoNewPrivileges` / `ProtectKernelTunables` / `ProtectControlGroups` / `RestrictSUIDSGID`
+- 危险命令黑名单（`rm -rf /`、`mkfs`、`dd` 写裸盘…）—— **所有档位都拦**
+- 全程审计 JSONL（放开沙箱记为 `agent.run.unsafe`）
+
+agent 进程**整体**通过 `systemd-run --user` 跑在沙箱里，
+所以内核级限制对工具调用真实生效。实测：同一请求在 `standard` 档写入成功，
+在 `strict` 档报 `Errno 30 Read-only file system` —— 是内核拦的，不是软件层的"策略拒绝"。
+
+完整模型与风险说明见 `docs/05-PERMISSIONS.md`。
 
 ---
 
@@ -178,7 +205,7 @@ NexusOS 的发布模型学自 Omarchy，但只学它真正决定"是不是一个
 
 ```bash
 # 方式一：单文件安装器（下载 → 校验 sha256 → 可选验签 → 安装）
-curl -fsSL https://github.com/nexusos/nexusos/releases/latest/download/nexus-install.sh | bash
+curl -fsSL https://github.com/AndyZhuang/nexusOS/releases/latest/download/nexus-install.sh | bash
 
 # 方式二：deb
 sudo apt install ./nexusos_0.2.0_amd64.deb
@@ -244,7 +271,9 @@ nexusOS/
 │   ├── 00-DESIGN-REVIEW.md        对 v0.1 的评审：12 个硬伤 + 证据 + 修法
 │   ├── 01-NexusOS-Design-v0.2.md  设计定稿
 │   ├── 02-DELIVERY-REPORT.md      实装验证报告
-│   └── 03-RELEASE-MODEL.md        发布模型（学 Omarchy 的六条机制）
+│   ├── 03-RELEASE-MODEL.md        发布模型（学 Omarchy 的六条机制）
+│   ├── 04-PLAYBOOK.md             试玩手册（命令逐条实测）
+│   └── 05-PERMISSIONS.md          权限模型（四档 + 双层边界的实测证据）
 ├── install/nexus-bootstrap    幂等安装器
 ├── bin/
 │   ├── nexus-release          发布流水线
@@ -255,21 +284,23 @@ nexusOS/
 ├── migrations/                配置迁移脚本
 ├── src/nexus/
 │   ├── config.py    路径、两级配置合并、TOML 读写
+│   ├── permissions.py 权限档位（沙箱层 + 策略层的唯一真相源）
 │   ├── layering.py  分层管理（symlink / overlayfs 双后端）
 │   ├── registry.py  模型注册表（唯一真相源）
 │   ├── broker.py    显存仲裁 + 守护进程 + stage
 │   ├── gateway.py   OpenAI 兼容网关
-│   ├── sandbox.py   systemd 沙箱
+│   ├── sandbox.py   systemd 沙箱执行器
 │   ├── mcp.py       MCP server（stdlib JSON-RPC）+ 26 个工具
-│   ├── agent.py     适配器 SPI：local / cli / mock
+│   ├── agent.py     适配器 SPI：local / cli / mock（+ 沙箱子进程派生）
 │   ├── events.py    事件总线（规则引擎 + 诊断派发）
 │   ├── doctor.py    事实快照构建器
 │   ├── audit.py     审计
+│   ├── tutorial.py  新手引导
 │   ├── version.py   版本与通道
 │   ├── update.py    迁移执行 + 更新流程
 │   └── cli.py       对话式控制面
 ├── systemd/nexus-*.service    systemd 单元
-├── tests/selftest.sh          20 项自检
+├── tests/selftest.sh          自检套件
 └── .github/workflows/         CI + Release
 ```
 

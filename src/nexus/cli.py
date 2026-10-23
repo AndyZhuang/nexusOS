@@ -12,7 +12,8 @@ import sys
 import textwrap
 import time
 
-from . import audit, config, doctor, events, layering, sandbox, update, version as version_mod
+from . import (audit, config, doctor, events, layering, permissions, sandbox,
+               tutorial, update, version as version_mod)
 from .agent import build_system_prompt, get_adapter, run_agent
 from .broker import Broker, gpu_state
 from .gateway import Gateway
@@ -21,7 +22,15 @@ from .registry import Registry, current_registry
 
 COMMANDS = ("status", "doctor", "models", "gpu", "events", "agent", "mcp",
             "logs", "reset", "install", "explain", "gateway", "audit",
-            "update", "channel", "version")
+            "update", "channel", "version", "permissions", "tutorial",
+            "__agent-child")
+
+
+def _resolve_tier(explicit: str | None = None) -> str:
+    """档位优先级：命令行显式 > 环境变量 > policy.toml > 内置默认。"""
+    if explicit:
+        return explicit
+    return permissions.resolve_tier()
 
 
 # ---------------------------------------------------------------- 展示helper
@@ -55,7 +64,11 @@ def cmd_status(args) -> int:
     gpu = gpu_state()
 
     print("╭─ NexusOS 状态 " + "─" * 46)
-    print(f"│ 版本        : 0.2.0   运行时长: {doctor.system_facts().get('uptime_sec', 0)}s")
+    _ver = version_mod.installed()
+    _tier = _resolve_tier()
+    print(f"│ 版本        : {_ver.version}   运行时长: "
+          f"{doctor.system_facts().get('uptime_sec', 0)}s")
+    print(f"│ 权限档位    : {_tier} ({permissions.TIER_LABEL[_tier]})")
     print(f"│ 分层后端    : {layer.get('backend')}   基底 {layer.get('base')}")
     print(f"│ 数据目录    : {config.data_home()}")
     print(f"│ 配置目录    : {config.config_home()}")
@@ -159,7 +172,8 @@ def cmd_doctor(args) -> int:
     if args.agent:
         result = run_agent(f"请诊断这台机器当前状态，给出最需要关注的三点。\n\n"
                            + doctor.render_context(ctx),
-                           adapter=args.adapter, sandbox_tier="standard")
+                           adapter=args.adapter,
+                           sandbox_tier=_resolve_tier())
         print("\n=== Agent 诊断 ===")
         print(result.output or result.error)
     return 0
@@ -210,14 +224,15 @@ def cmd_events(args) -> int:
 def cmd_agent(args) -> int:
     adp = get_adapter(args.adapter)
     print(f"适配器 {args.adapter} 可用: {_yes(adp.available())}")
+    tier = _resolve_tier(getattr(args, "tier", None))
     if args.explain:
-        print(json.dumps(sandbox.describe(args.tier), ensure_ascii=False, indent=2))
+        print(json.dumps(sandbox.describe(tier), ensure_ascii=False, indent=2))
         return 0
     if not args.task:
         print("需要任务描述")
         return 2
     task = " ".join(args.task) if isinstance(args.task, list) else str(args.task)
-    res = run_agent(task, adapter=args.adapter, sandbox_tier=args.tier,
+    res = run_agent(task, adapter=args.adapter, sandbox_tier=tier,
                     model=args.model, max_iterations=args.max_iterations)
     if args.json:
         print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2))
@@ -306,7 +321,8 @@ def cmd_install(args) -> int:
 
 
 def cmd_explain(args) -> int:
-    print(json.dumps(sandbox.describe(args.tier), ensure_ascii=False, indent=2))
+    print(json.dumps(sandbox.describe(_resolve_tier(getattr(args, "tier", None))),
+                     ensure_ascii=False, indent=2))
     print()
     print("=== Agent system prompt（实际注入内容）===")
     print(build_system_prompt())
@@ -396,8 +412,9 @@ def cmd_gateway(args) -> int:
 def cmd_dialogue(args) -> int:
     """自然语言入口：nexus "<任意指令>"。"""
     task = " ".join(args.task)
-    print(f"→ 交给 agent（适配器 {args.adapter}，沙箱 {args.tier}）…\n")
-    res = run_agent(task, adapter=args.adapter, sandbox_tier=args.tier,
+    tier = _resolve_tier(getattr(args, "tier", None))
+    print(f"→ 交给 agent（适配器 {args.adapter}，沙箱档位 {tier}）…\n")
+    res = run_agent(task, adapter=args.adapter, sandbox_tier=tier,
                     model=args.model, max_iterations=args.max_iterations)
     print(res.output or res.error)
     if res.tool_calls:
@@ -405,6 +422,69 @@ def cmd_dialogue(args) -> int:
         for c in res.tool_calls:
             status = "ok" if c.get("ok") else f"失败: {c.get('error')}"
             print(f"  {c['tool']}({json.dumps(c.get('args', {}), ensure_ascii=False)}) → {status}")
+    return 0 if res.ok else 1
+
+
+def cmd_permissions(args) -> int:
+    """查看 / 设置权限档位。"""
+    if args.action == "set":
+        try:
+            res = permissions.set_tier(args.name)
+        except ValueError as exc:
+            print(f"错误: {exc}")
+            return 2
+        print(f"✓ 权限档位已设为 {res['tier']}  ({permissions.TIER_LABEL[res['tier']]})")
+        print(f"  配置文件: {res['path']}")
+        print(f"  可写根  : {', '.join(res['write_roots'])}")
+        if res.get("cleared"):
+            print(f"  已清除写死的路径配置: {', '.join(res['cleared'])}"
+                  "（否则档位会被架空）")
+        print("  新档位对后续调用生效（正在跑的 agent 不受影响）")
+        return 0
+
+    if args.action == "list":
+        cur = permissions.resolve_tier()
+        print("档位          名称       说明")
+        print("-" * 78)
+        for t in permissions.TIERS:
+            mark = "← 当前" if t == cur else "      "
+            print(f"{t:<12} {permissions.TIER_LABEL[t]:<8} {permissions.TIER_SUMMARY[t]}")
+            if t == cur:
+                print(f"{'':12} {mark}")
+        return 0
+
+    # show
+    d = permissions.describe(_resolve_tier(getattr(args, "tier", None)))
+    print(f"权限档位: {d['tier']}  ({d['label']})")
+    print(f"说明    : {d['summary']}")
+    print(f"可读根  : {', '.join(d['read_roots'])}")
+    print(f"可写根  : {', '.join(d['write_roots'])}")
+    print(f"黑名单  : {len(d['denied_commands'])} 条危险命令（所有档位都拦）")
+    print("\n=== systemd 沙箱属性（内核级）===")
+    for p in d["sandbox_properties"]:
+        print(f"  {p}")
+    print(f"\n{d['note']}")
+    return 0
+
+
+def cmd_tutorial(args) -> int:
+    """新手引导。"""
+    return tutorial.run(reset=args.reset, quiet=args.quiet)
+
+
+def cmd_agent_child(args) -> int:
+    """沙箱子进程入口：读 stdin 的 JSON，跑 agent，结果写回 state 文件。"""
+    payload = json.loads(sys.stdin.read() or "{}")
+    tier = _resolve_tier(payload.get("tier"))
+    res = run_agent(payload.get("task", ""),
+                    adapter=payload.get("adapter", "local"),
+                    sandbox_tier=tier,
+                    model=payload.get("model"),
+                    max_iterations=int(payload.get("max_iterations", 6)),
+                    save_session=False)
+    out = config.state_dir() / "agent-result.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(res.to_dict(), ensure_ascii=False), encoding="utf-8", newline="\n")
     return 0 if res.ok else 1
 
 
@@ -446,7 +526,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("agent", help="直接调用 agent")
     s.add_argument("task", nargs="*")
     s.add_argument("--adapter", default="local", choices=["local", "cli", "mock"])
-    s.add_argument("--tier", default="strict", choices=list(sandbox.TIERS))
+    s.add_argument("--tier", default=None, choices=list(sandbox.TIERS),
+                   help="权限档位（默认取 policy.toml 的 default_tier）")
     s.add_argument("--model", default=None)
     s.add_argument("--max-iterations", type=int, default=6)
     s.add_argument("--json", action="store_true")
@@ -473,8 +554,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_install)
 
     s = sub.add_parser("explain", help="展示信任边界与 system prompt")
-    s.add_argument("--tier", default="strict", choices=list(sandbox.TIERS))
+    s.add_argument("--tier", default=None, choices=list(sandbox.TIERS))
     s.set_defaults(func=cmd_explain)
+
+    s = sub.add_parser("permissions", help="查看 / 设置权限档位")
+    s.add_argument("action", nargs="?", default="show", choices=["show", "list", "set"])
+    s.add_argument("name", nargs="?", default="")
+    s.add_argument("--tier", default=None, choices=list(sandbox.TIERS))
+    s.set_defaults(func=cmd_permissions)
+
+    s = sub.add_parser("tutorial", help="新手引导")
+    s.add_argument("--reset", action="store_true", help="重置引导进度")
+    s.add_argument("--quiet", action="store_true", help="只跑步骤不打印说明")
+    s.set_defaults(func=cmd_tutorial)
+
+    s = sub.add_parser("__agent-child", help=argparse.SUPPRESS)
+    s.set_defaults(func=cmd_agent_child)
 
     s = sub.add_parser("gateway", help="前台启动 AI 网关")
     s.add_argument("--host", default="127.0.0.1")
@@ -504,12 +599,16 @@ def main(argv: list[str] | None = None) -> int:
     # `nexus agent run "<任务>"` 与 `nexus agent "<任务>"` 等价
     if len(argv) >= 2 and argv[0] == "agent" and argv[1] == "run":
         argv = [argv[0]] + argv[2:]
+    # 首次进入（或直接 `nexus`）→ 新手引导
+    if not argv:
+        config.ensure_dirs()
+        return tutorial.run()
     # 自然语言入口：首个 token 不是已知命令 → 当作对话任务
-    if argv and argv[0] not in COMMANDS and not argv[0].startswith("-"):
+    if argv[0] not in COMMANDS and not argv[0].startswith("-"):
         p = argparse.ArgumentParser(prog="nexus")
         p.add_argument("task", nargs="+")
         p.add_argument("--adapter", default="local")
-        p.add_argument("--tier", default="strict", choices=list(sandbox.TIERS))
+        p.add_argument("--tier", default=None, choices=list(sandbox.TIERS))
         p.add_argument("--model", default=None)
         p.add_argument("--max-iterations", type=int, default=6)
         args = p.parse_args(argv)

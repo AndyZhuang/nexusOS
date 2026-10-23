@@ -23,10 +23,11 @@ CHANNELS = ("stable", "rc", "edge", "dev")
 DEFAULT_CHANNEL = "stable"
 
 # 各通道的产物来源。{version} 会被替换。
+REPO_SLUG = "AndyZhuang/nexusOS"
 CHANNEL_SOURCES = {
-    "stable": "https://github.com/nexusos/nexusos/releases/download/v{version}/nexusos-{version}.tar.gz",
-    "rc": "https://github.com/nexusos/nexusos/releases/download/v{version}-rc/nexusos-{version}-rc.tar.gz",
-    "edge": "https://github.com/nexusos/nexusos/releases/download/edge/nexusos-edge.tar.gz",
+    "stable": f"https://github.com/{REPO_SLUG}/releases/download/v{{version}}/nexusos-{{version}}.tar.gz",
+    "rc": f"https://github.com/{REPO_SLUG}/releases/download/v{{version}}-rc/nexusos-{{version}}-rc.tar.gz",
+    "edge": f"https://github.com/{REPO_SLUG}/releases/download/edge/nexusos-edge.tar.gz",
     "dev": "local",
 }
 
@@ -118,7 +119,7 @@ def channel_source(channel: str | None = None) -> str:
 
 def release_base_url() -> str:
     return os.environ.get("NEXUS_RELEASE_BASE",
-                          "https://github.com/nexusos/nexusos/releases/download")
+                          f"https://github.com/{REPO_SLUG}/releases/download")
 
 
 def artifact_name(version: str, channel: str = "stable") -> str:

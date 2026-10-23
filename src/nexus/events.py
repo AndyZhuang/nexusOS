@@ -21,7 +21,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from . import audit, config, doctor
+from . import audit, config, doctor, permissions
 from .agent import run_agent
 
 DEFAULT_RULES: list[dict] = [
@@ -225,7 +225,8 @@ class EventRouter:
                 f"请基于下面的系统事实诊断根因并给出可执行的修复步骤。\n\n"
                 f"{rendered}")
         adapter = adapter or rule.adapter
-        result = run_agent(task, adapter=adapter, sandbox_tier="standard")
+        result = run_agent(task, adapter=adapter,
+                           sandbox_tier=permissions.resolve_tier())
 
         incident_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{rule.name}"
         d = config.incidents_dir() / time.strftime("%Y%m%d")

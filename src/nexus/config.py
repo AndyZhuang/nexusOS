@@ -239,13 +239,15 @@ def load_state(name: str, default: dict | None = None) -> dict:
 # ---------------------------------------------------------------- 外部命令
 
 
-def run(cmd: list[str], timeout: int = 30, env: dict | None = None) -> tuple[int, str, str]:
+def run(cmd: list[str], timeout: int = 30, env: dict | None = None,
+        stdin_data: str | None = None) -> tuple[int, str, str]:
     """执行外部命令，返回 (rc, stdout, stderr)。不抛异常。"""
     try:
         e = dict(os.environ)
         if env:
             e.update(env)
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=e)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           env=e, input=stdin_data)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
         return 124, "", f"timeout after {timeout}s"

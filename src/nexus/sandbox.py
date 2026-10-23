@@ -5,6 +5,9 @@
 因此可以做到"家目录只读、仅 nexus 数据区可写"。
 
 对应 docs/00-DESIGN-REVIEW.md H4（v0.1 的"软约束不阻断"等于 Omarchy 4.0 的漏洞形态）。
+
+档位定义统一放在 permissions.py —— 沙箱层与 MCP 策略层由同一个 tier 驱动，
+避免出现"沙箱说一套、策略做一套"（v0.2 的真实缺陷）。
 """
 from __future__ import annotations
 
@@ -14,53 +17,39 @@ import shutil
 import subprocess
 from typing import Sequence
 
-from . import config
+from . import config, permissions
 
-# 三档沙箱强度
-TIERS = ("strict", "standard", "off")
+# 档位定义在 permissions 模块（唯一真相源），这里保留别名以兼容旧调用点
+TIERS = permissions.TIERS
 
 
 def _data_paths() -> list[str]:
     return [str(config.data_home()), str(config.config_home())]
 
 
-def build_properties(tier: str = "strict", writable: Sequence[str] | None = None,
+def build_properties(tier: str = permissions.DEFAULT_TIER,
+                     writable: Sequence[str] | None = None,
                      memory_max: str | None = None,
                      network: bool = True) -> list[str]:
-    """构造 systemd-run 的 -p 属性列表。"""
+    """构造 systemd-run 的 -p 属性列表。
+
+    tier 决定基础属性；writable 是额外的可写路径（在档位允许的前提下叠加）。
+    """
     if tier not in TIERS:
-        tier = "standard"
-    props: list[str] = []
+        tier = permissions.DEFAULT_TIER
+    props: list[str] = permissions.sandbox_properties(tier)
     if tier == "off":
         return props
 
-    props += [
-        "NoNewPrivileges=yes",
-        "PrivateTmp=yes",
-        "PrivateDevices=yes",
-        "ProtectKernelTunables=yes",
-        "ProtectKernelModules=yes",
-        "ProtectControlGroups=yes",
-        "RestrictSUIDSGID=yes",
-        "LockPersonality=yes",
-        "MemoryDenyWriteExecute=no",
-        "SystemCallArchitectures=native",
-    ]
-    if tier == "strict":
-        props += [
-            "ProtectSystem=strict",
-            "ProtectHome=read-only",
-        ]
-        rw = list(writable or []) + _data_paths()
-        # ReadWritePaths 覆盖 ProtectHome=read-only 的只读效果
-        for p in rw:
-            if p and os.path.exists(p):
+    if writable:
+        # 档位默认之外再放行这些路径（显式叠加，不覆盖档位的只读区域）
+        for p in writable:
+            if p and os.path.exists(p) and f"ReadWritePaths={p}" not in props:
                 props.append(f"ReadWritePaths={p}")
-        props.append("RestrictAddressFamilies=" +
-                     ("AF_UNIX AF_INET AF_INET6" if network else "AF_UNIX"))
-    else:
-        props.append("ProtectSystem=full")
-        props.append("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6")
+
+    if not network:
+        props = [p for p in props if not p.startswith("RestrictAddressFamilies=")]
+        props.append("RestrictAddressFamilies=AF_UNIX")
     if memory_max:
         props.append(f"MemoryMax={memory_max}")
     return props
@@ -111,14 +100,11 @@ def run_sandboxed(cmd: Sequence[str], *, tier: str = "strict",
         return 1, "", str(exc)
 
 
-def describe(tier: str = "strict") -> dict:
+def describe(tier: str = permissions.DEFAULT_TIER) -> dict:
     """给 nexus status / agent --explain 展示当前边界。"""
-    props = build_properties(tier)
-    return {
-        "tier": tier,
-        "systemd_run": systemd_run_available(),
-        "properties": props,
-        "writable": _data_paths(),
-        "note": ("tier=strict 时系统目录与家目录只读，仅 nexus 数据区可写；"
-                 "tier=off 表示显式放开边界（会被审计记录）"),
-    }
+    d = permissions.describe(tier)
+    d["systemd_run"] = systemd_run_available()
+    d["writable"] = _data_paths()
+    d["note"] = ("档位由 nexus permissions 管理；家目录在 standard/open 档可写；"
+                 "tier=off 表示显式放开边界（会被审计记录）")
+    return d

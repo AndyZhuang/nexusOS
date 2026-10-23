@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # NexusOS 单文件安装器 —— 供 `curl ... | bash` 使用。
 #
-#   curl -fsSL https://github.com/nexusos/nexusos/releases/latest/download/nexus-install.sh | bash
+#   curl -fsSL https://github.com/AndyZhuang/nexusOS/releases/latest/download/nexus-install.sh | bash
 #
 # 行为：
 #   1. 解析通道与版本（环境变量 NEXUS_CHANNEL / NEXUS_VERSION 可覆盖）
@@ -12,14 +12,14 @@
 # 环境变量：
 #   NEXUS_CHANNEL      stable(默认) | rc | edge | dev
 #   NEXUS_VERSION      指定版本，默认取 latest
-#   NEXUS_REPO         GitHub 仓库，默认 nexusos/nexusos
+#   NEXUS_REPO         GitHub 仓库，默认 AndyZhuang/nexusOS
 #   NEXUS_BASE_URL     直接指定下载基址（镜像/自建）
 #   NEXUS_REQUIRE_SIGN 设为 1 时必须验签
 #   NEXUS_DATA_HOME / NEXUS_CONFIG_HOME  覆盖默认路径
 set -euo pipefail
 
 CHANNEL="${NEXUS_CHANNEL:-stable}"
-REPO_SLUG="${NEXUS_REPO:-nexusos/nexusos}"
+REPO_SLUG="${NEXUS_REPO:-AndyZhuang/nexusOS}"
 BASE="${NEXUS_BASE_URL:-https://github.com/$REPO_SLUG/releases/download}"
 
 say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }

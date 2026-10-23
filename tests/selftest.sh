@@ -10,6 +10,10 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 PASS=0; FAIL=0
 
+# 仓库根（从脚本位置推导，不写死绝对路径）
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export NEXUS_REPO="$REPO"
+
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; PASS=$((PASS+1)); }
 bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); }
 sec()  { printf '\n\033[1m%s\033[0m\n' "$1"; }
@@ -29,8 +33,9 @@ if nexus models list 2>&1 | grep -q "模型"; then ok "模型注册表可读"; e
 if nexus gpu 2>&1 | grep -q "显存"; then ok "显存快照可读"; else bad "显存快照异常"; fi
 # 适配判定是纯函数，用**注入的**显存状态做确定性断言（不受本机负载影响）
 FIT=$(python3 - <<'PY'
+import os
 import sys
-sys.path.insert(0, "/mnt/e/LongevityLLM/nexusOS/src")
+sys.path.insert(0, os.environ["NEXUS_REPO"] + "/src")
 from nexus.broker import Broker, GpuState
 from nexus.registry import ModelEntry
 
@@ -86,6 +91,87 @@ if nexus explain --tier strict 2>&1 | grep -q "ProtectSystem=strict"; then
   ok "strict tier 沙箱属性正确"; else bad "沙箱属性缺失"; fi
 if nexus explain --tier strict 2>&1 | grep -q "ReadWritePaths"; then
   ok "数据区可写白名单已配置"; else bad "可写白名单缺失"; fi
+
+# ---------------------------------------------------------------- 权限档位
+sec "权限档位（0.3.0）"
+if nexus permissions 2>&1 | grep -q "权限档位"; then
+  ok "nexus permissions 可用"; else bad "nexus permissions 异常"; fi
+if nexus permissions list 2>&1 | grep -qE "strict|standard|open|off"; then
+  ok "四个档位可列出"; else bad "档位列表异常"; fi
+
+# 档位 → 路径根的映射是纯函数，用断言验证（不依赖本机状态）
+PERM=$(python3 - <<'PY'
+import os
+import pathlib
+import sys
+sys.path.insert(0, os.environ["NEXUS_REPO"] + "/src")
+from nexus import permissions
+
+home = str(pathlib.Path.home())
+errs = []
+
+def has_home(tier):
+    for r in permissions.policy_for(tier)["write_roots"]:
+        if r == "/" or r == home or home in pathlib.Path(r).parents:
+            return True
+    return False
+
+# strict 不含家目录，standard / open 含家目录
+if has_home("strict"):
+    errs.append("strict 档不应含家目录")
+if not has_home("standard"):
+    errs.append("standard 档应含家目录")
+if not has_home("open"):
+    errs.append("open 档应含家目录")
+# off 全放开
+if "/" not in permissions.policy_for("off")["write_roots"]:
+    errs.append("off 档应可写 /")
+# 危险命令黑名单在所有档位都存在
+for tier in permissions.TIERS:
+    if not permissions.policy_for(tier)["denied_commands"]:
+        errs.append(f"{tier} 档黑名单为空")
+# 显式 write_roots 优先于档位默认值（用户显式配置不能被架空，但档位要能覆盖它）
+pol = permissions.policy_for("strict", {"write_roots": ["/tmp"]})
+if pol["write_roots"] != ["/tmp"]:
+    errs.append("显式 write_roots 未生效")
+# 显式空黑名单要能真的清空（不是被 or 兜底吃掉）
+pol2 = permissions.policy_for("strict", {"denied_commands": []})
+if pol2["denied_commands"]:
+    errs.append("显式空黑名单未生效")
+print("OK" if not errs else "; ".join(errs))
+PY
+)
+if [ "$PERM" = "OK" ]; then
+  ok "档位 → 路径根映射正确（strict/standard/open/off）"
+else
+  bad "档位映射断言失败: $PERM"
+fi
+
+# 沙箱子进程：审计里应出现父子两条 agent.run
+LOGDIR=~/.local/share/nexus/log/audit
+BEFORE=$(cat "$LOGDIR"/$(date +%Y-%m-%d).jsonl 2>/dev/null | grep -c '"agent.run"' || true)
+nexus agent run --adapter mock "权限自检" > /dev/null 2>&1
+AFTER=$(cat "$LOGDIR"/$(date +%Y-%m-%d).jsonl 2>/dev/null | grep -c '"agent.run"' || true)
+if [ "$((AFTER - BEFORE))" -ge 2 ]; then
+  ok "agent 确实在沙箱子进程中运行（父子两条 agent.run）"
+else
+  bad "未检测到沙箱子进程派生 (before=$BEFORE after=$AFTER)"
+fi
+
+# 内核级边界：沙箱内写 /etc 必须被只读挂载拦住
+SBX=$(systemd-run --user --quiet --wait --pipe --collect \
+  -p NoNewPrivileges=yes -p PrivateTmp=yes \
+  -p ProtectSystem=strict -p ProtectHome=read-only \
+  -- /bin/bash -lc 'echo x > /etc/nexus-selftest-probe 2>/dev/null && echo WROTE || echo BLOCKED' 2>/dev/null | tail -1)
+if echo "$SBX" | grep -q "BLOCKED\|Read-only"; then
+  ok "内核级边界生效（沙箱内 /etc 不可写）"; else bad "沙箱边界未生效: $SBX"; fi
+
+# ---------------------------------------------------------------- 新手引导
+sec "新手引导"
+if nexus tutorial --quiet > /dev/null 2>&1; then
+  ok "nexus tutorial 可运行"; else bad "tutorial 运行失败"; fi
+if [ -f ~/.local/share/nexus/state/tutorial.json ]; then
+  ok "引导进度已记录"; else bad "引导进度未落盘"; fi
 
 # ---------------------------------------------------------------- Layer 3
 sec "Layer 3 · 事件总线"

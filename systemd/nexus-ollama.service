@@ -1,6 +1,6 @@
 [Unit]
 Description=NexusOS local inference backend (Ollama)
-Documentation=https://github.com/nexusos/nexus
+Documentation=https://github.com/AndyZhuang/nexusOS
 After=default.target
 
 [Service]

@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 
-from . import config, layering
+from . import config, layering, permissions
 from .registry import DEFAULT_CONFIG, Registry, discover_from_backend, discover_from_store
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -22,22 +22,8 @@ PKG_ROOT = HERE.parent          # src/nexus -> src
 REPO_ROOT = PKG_ROOT.parent      # src -> repo
 UNITS_SRC = REPO_ROOT / "systemd"
 
-DEFAULT_POLICY = {
-    "read_roots": ["/", str(config.data_home())],
-    "write_roots": [str(config.data_home()), str(config.config_home())],
-    "allow_shell": True,
-    "allow_restart": True,
-    "denied_commands": [
-        r"\brm\s+(-[a-zA-Z]*\s+)*/(\s|$)",
-        r":\(\)\s*\{",
-        r"mkfs",
-        r"dd\s+if=.*of=/dev/",
-        r"shutdown",
-        r"reboot",
-        r">\s*/dev/sd[a-z]",
-        r"wipefs",
-    ],
-}
+# 权限策略默认值集中在 permissions 模块（档位推导路径根，不在这里写死）
+DEFAULT_POLICY = permissions.default_policy()
 
 DEFAULT_SYSTEM_PROMPT = """你是 NexusOS 的系统代理，运行在一台由 NexusOS 管理的 Linux 工作站上。
 
@@ -329,6 +315,7 @@ def bootstrap(source: pathlib.Path | None = None, enable: bool = True,
 
     if not quiet:
         print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        print("\n下一步：直接运行 `nexus` 走一遍新手引导（会真的执行命令并展示输出）。")
     report["version"] = _record_version()
     return report
 
