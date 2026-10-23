@@ -208,8 +208,14 @@ def perform_update(channel: str | None = None, dry_run: bool = False,
     if not skip_fetch:
         fetched = fetch_release(ch)
         steps.append({"step": "fetch", **fetched})
-        if not fetched.get("ok") and not dry_run:
-            return {"ok": False, "error": fetched.get("error"), "steps": steps}
+        if not fetched.get("ok"):
+            msg = fetched.get("error") or "取产物失败"
+            if dry_run:
+                # dry-run 也要如实反映取不到产物 —— 静默成功会误导
+                steps[-1]["note"] = "dry-run：网络不可用时这一步必然失败，属预期"
+                return {"ok": False, "error": msg, "steps": steps,
+                        "hint": "只想看本地流程请加 --skip-fetch"}
+            return {"ok": False, "error": msg, "steps": steps}
     else:
         steps.append({"step": "fetch", "ok": True, "skipped": True})
 

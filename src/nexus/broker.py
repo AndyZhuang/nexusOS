@@ -176,6 +176,9 @@ class Broker:
         except Exception:
             own_mb = 0
         effective_free = free + own_mb
+        # 有效容量 = min(实际空闲, 预算)。预算扣掉了预留量，
+        # 所以"空闲刚好够"但会击穿预留的情况必须判为不可完全驻留。
+        capacity = min(effective_free, budget)
         if not gpu.available:
             return {"fit": "unknown", "need_mb": need, "free_mb": 0,
                     "budget_mb": 0, "reason": "GPU 不可用"}
@@ -183,10 +186,11 @@ class Broker:
             return {"fit": "unknown", "need_mb": 0, "free_mb": effective_free,
                     "budget_mb": budget,
                     "reason": "注册表未登记显存开销"}
-        if need <= effective_free:
+        if need <= capacity:
             return {"fit": "gpu", "need_mb": need, "free_mb": effective_free,
                     "budget_mb": budget,
-                    "reason": f"显存充足（余 {effective_free}MB > 需 {need}MB）"}
+                    "reason": (f"显存充足（可用 {effective_free}MB / 预算 {budget}MB "
+                               f"> 需 {need}MB）")}
         if need <= budget and need <= self.registry.model_cap_mb:
             return {"fit": "partial", "need_mb": need, "free_mb": effective_free,
                     "budget_mb": budget,
@@ -209,6 +213,24 @@ class Broker:
     def unload_all(self, backend: str = "ollama") -> list[dict]:
         return [self.unload(m["name"], backend) for m in self.loaded_models(backend) if m.get("name")]
 
+    def available_in_backend(self, name: str, backend: str = "ollama") -> bool:
+        """后端当前能否直接提供这个模型（不下载的话）。"""
+        health = self.backend_health(backend)
+        models = health.get("models") or []
+        return name in models
+
+    def in_shared_store(self, name: str) -> bool:
+        """该模型是否存在于共享 store（Windows 侧 ollama 仓库）里。"""
+        for b in self.registry.backends:
+            md = self.registry.backend(b).get("models_dir")
+            if not md:
+                continue
+            from .registry import discover_from_store
+            for m in discover_from_store(md):
+                if m["name"] == name:
+                    return True
+        return False
+
     def load(self, name: str, backend: str = "ollama", force: bool = False) -> dict:
         """加载模型。独占语义：先卸载其他驻留模型。预算不足则拒绝并给建议。"""
         entry = self.registry.get(name)
@@ -221,6 +243,19 @@ class Broker:
         if verdict["fit"] == "cpu" and not force:
             return {"ok": False, "error": "显存不足，拒绝加载", "fit": verdict,
                     "advice": self.advice(entry, gpu, verdict)}
+
+        # 后端本地没有这个模型 → 需要先从共享 store stage 过来
+        if not self.available_in_backend(entry.name, backend):
+            shared = self.in_shared_store(entry.name)
+            if shared:
+                return {"ok": False, "error": f"模型 {entry.name} 不在后端本地仓库中",
+                        "fit": verdict,
+                        "advice": [f"先 stage 到本地 ext4 仓库再加载（drvfs 上加载极慢）："
+                                   f"nexus models stage {entry.name}"]}
+            return {"ok": False, "error": f"后端 {backend} 上找不到模型 {entry.name}",
+                    "fit": verdict,
+                    "advice": [f"该模型既不在后端本地仓库也不在共享 store；"
+                               f"检查 models.toml 的 backend 配置或先 pull 模型"]}
 
         # 独占：卸载其他
         evicted = []

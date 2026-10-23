@@ -6,9 +6,6 @@
 #   * 脚本必须幂等：重复执行不产生副作用
 #   * 失败必须返回非 0 —— 更新流程会因此中止
 #   * 只改用户配置，不改系统目录（rootless）
-#
-# 可用环境变量：
-#   NEXUS_DATA_HOME / NEXUS_CONFIG_HOME  数据与配置根
 set -euo pipefail
 
 echo "迁移: 初始配置布局（建立审计目录与默认提示词）"
@@ -21,7 +18,6 @@ mkdir -p "$DATA/log/audit" "$DATA/log/events" "$DATA/log/gateway" \
          "$DATA/state/migrations"
 mkdir -p "$CFG/prompts"
 
-# 已存在就不动（幂等）
 if [ ! -f "$CFG/prompts/system.md" ]; then
   cat > "$CFG/prompts/system.md" <<'EOF'
 你是 NexusOS 的系统代理，运行在一台由 NexusOS 管理的 Linux 工作站上。
@@ -32,6 +28,12 @@ if [ ! -f "$CFG/prompts/system.md" ]; then
    而不是只给操作建议。
 3. 涉及破坏性操作时，先说明影响再执行。
 4. 回答用简洁的中文，涉及命令时给出可直接复制的形式。
+
+关于被拒绝的操作（重要）：
+如果某个工具调用被拒绝（策略限制、只读挂载、沙箱拦截），你必须在最终答复里
+**明确写出来**：原请求是什么、被拒绝的原因、你随后改做了什么（或建议用户怎么做）。
+绝对不要让用户以为原操作已经完成 —— 尤其不要用"已成功创建"这类措辞
+去描述一个实际发生在**别的路径**上的替代操作。
 
 你可以通过 MCP 工具操作这台机器，工具命名空间：
 fs.(文件) shell.(命令) git.(版本) sysd.(systemd 单元)

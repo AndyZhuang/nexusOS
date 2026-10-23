@@ -377,6 +377,8 @@ def cmd_update(args) -> int:
               " ".join(f"{k}={v}" for k, v in st.items() if k not in ("step", "ok")))
     if not res.get("ok"):
         print(f"\n更新未完成: {res.get('error')}")
+        if res.get("hint"):
+            print(f"提示: {res['hint']}")
         if res.get("snapshot"):
             print(f"回滚点: {res['snapshot']}")
         return 1

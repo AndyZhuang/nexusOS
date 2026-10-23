@@ -40,14 +40,21 @@ class FakeBroker(Broker):
         self._gpu = gpu
     def residency(self, backend="ollama"):
         return []            # 隔离本机真实驻留状态
-    # 覆盖 gpu_state 的取值
     def fit(self, entry, gpu=None):
         return Broker.fit(self, entry, self._gpu)
 
-b = FakeBroker(GpuState(available=True, name="test", total_mb=16384, used_mb=13500, free_mb=2884))
-m = ModelEntry(name="qwen3.6:27b", vram_mb=16057)
-verdict = b.fit(m)["fit"]
-print(verdict)
+m = ModelEntry(name="qwen3.6:27b", vram_mb=16057)   # 16057 > 预算 15360
+busy = FakeBroker(GpuState(available=True, name="t", total_mb=16384, used_mb=13500, free_mb=2884))
+idle = FakeBroker(GpuState(available=True, name="t", total_mb=16384, used_mb=0, free_mb=16384))
+# 显存被占满 → cpu
+assert busy.fit(m)["fit"] == "cpu", busy.fit(m)
+# 显存全空但仍超出"扣掉预留后的预算" → 也不能判 gpu（必须守住预留量）
+assert idle.fit(m)["fit"] != "gpu", idle.fit(m)
+# 8B 在两种状态下都能完全驻留
+m8 = ModelEntry(name="dolphin3:8b", vram_mb=4692)
+assert busy.fit(m8)["fit"] == "partial", busy.fit(m8)
+assert idle.fit(m8)["fit"] == "gpu", idle.fit(m8)
+print("cpu")
 PY
 )
 if [ "$FIT" = "cpu" ]; then
