@@ -27,9 +27,34 @@ if systemctl --user is-active nexus-gateway > /dev/null 2>&1; then
 sec "Layer 1 · 资源仲裁"
 if nexus models list 2>&1 | grep -q "模型"; then ok "模型注册表可读"; else bad "模型注册表异常"; fi
 if nexus gpu 2>&1 | grep -q "显存"; then ok "显存快照可读"; else bad "显存快照异常"; fi
-# 27B 模型必须被判为不可驻留（16GB 卡）
-FIT=$(nexus models list 2>/dev/null | grep -E "27b" | awk '{print $(NF-1)}' | head -1)
-if [ "$FIT" = "cpu" ]; then ok "27B 模型被判为 cpu（拒绝驻留）"; else bad "27B 适配判定错误: '$FIT'"; fi
+# 适配判定是纯函数，用**注入的**显存状态做确定性断言（不受本机负载影响）
+FIT=$(python3 - <<'PY'
+import sys
+sys.path.insert(0, "/mnt/e/LongevityLLM/nexusOS/src")
+from nexus.broker import Broker, GpuState
+from nexus.registry import ModelEntry
+
+class FakeBroker(Broker):
+    def __init__(self, gpu):
+        super().__init__()
+        self._gpu = gpu
+    def residency(self, backend="ollama"):
+        return []            # 隔离本机真实驻留状态
+    # 覆盖 gpu_state 的取值
+    def fit(self, entry, gpu=None):
+        return Broker.fit(self, entry, self._gpu)
+
+b = FakeBroker(GpuState(available=True, name="test", total_mb=16384, used_mb=13500, free_mb=2884))
+m = ModelEntry(name="qwen3.6:27b", vram_mb=16057)
+verdict = b.fit(m)["fit"]
+print(verdict)
+PY
+)
+if [ "$FIT" = "cpu" ]; then
+  ok "27B 在显存紧张时判为 cpu（拒绝驻留）"
+else
+  bad "27B 适配判定错误: '$FIT'（期望 cpu）"
+fi
 if timeout 10 curl -sf http://127.0.0.1:8080/v1/models > /dev/null; then
   ok "网关 /v1/models 可用"; else bad "网关 /v1/models 不可用"; fi
 if timeout 10 curl -sf http://127.0.0.1:8080/healthz > /dev/null; then

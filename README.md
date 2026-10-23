@@ -162,14 +162,97 @@ MCP 工具层是**第二道**边界：`fs.write` 到 `/etc` 会被策略直接�
 
 ---
 
+## 发布
+
+NexusOS 的发布模型学自 Omarchy，但只学它真正决定"是不是一个发行版"的那部分：
+**版本、通道、迁移、快照、签名**。ISO 只是一次性引导，可以后补。
+
+### 产物
+
+| 产物 | Profile | 需要 root | 用途 |
+|---|---|---|---|
+| `nexusos-<ver>.tar.gz` (+`.sha256`/`.sig`) | rootless | 否 | 任意 Ubuntu 24.04 / WSL2 / 裸机，一条命令装 |
+| `nexusos_<ver>_amd64.deb` | 系统级 | 是 | `apt install`，systemd 系统单元随包启动 |
+
+### 安装
+
+```bash
+# 方式一：单文件安装器（下载 → 校验 sha256 → 可选验签 → 安装）
+curl -fsSL https://github.com/nexusos/nexusos/releases/latest/download/nexus-install.sh | bash
+
+# 方式二：deb
+sudo apt install ./nexusos_0.2.0_amd64.deb
+
+# 方式三：源码树自举（开发者）
+bash install/nexus-bootstrap
+```
+
+环境变量：`NEXUS_CHANNEL`（stable/rc/edge/dev）、`NEXUS_VERSION`、
+`NEXUS_REPO`、`NEXUS_BASE_URL`、`NEXUS_REQUIRE_SIGN=1`（强制验签）。
+
+### 四条更新通道
+
+```bash
+nexus channel list           # 查看
+nexus channel set edge       # 切换
+nexus channel current        # 当前
+```
+
+`stable` 官方发布版 ｜ `rc` 候选验证版 ｜ `edge` 最新构建 ｜ `dev` 直接跑本地源码树。
+
+### 唯一受支持的更新入口
+
+```bash
+nexus update            # 空间检查 → 快照 → 取产物 → 迁移 → 换基底 → 重启
+nexus update --dry-run  # 只看会发生什么
+nexus version           # 版本与待执行迁移
+```
+
+直接跑 `apt upgrade` 会跳过快照与迁移 —— 这是有意的。
+
+### 迁移机制
+
+`migrations/<Unix时间戳>.sh`，幂等，每用户只跑一次。
+更新时按新增顺序执行，失败即中止更新并保留回滚点。
+
+### 发布流水线
+
+```bash
+bash bin/nexus-release check     # 前置检查
+bash bin/nexus-release build     # 打包 tarball + sha256
+bash bin/nexus-release test      # 跑自检，失败即拒绝发布
+bash bin/nexus-release sign      # GPG detached 签名
+bash bin/nexus-release verify    # 校验 sha256 + 签名
+bash bin/nexus-release release   # 全流程
+```
+
+CI：`.github/workflows/ci.yml`（每次 push，纯逻辑断言，不依赖硬件）
+Release：`.github/workflows/release.yml`（tag 触发 → 打包 → 签名 → GitHub Release）
+
+完整设计见 `docs/03-RELEASE-MODEL.md`。
+
+---
+
 ## 目录结构
 
 ```
 nexusOS/
+├── VERSION                    版本号
+├── CHANGELOG.md
+├── AGENTS.md                  项目约定（给 agent 看的）
 ├── docs/
-│   ├── 00-DESIGN-REVIEW.md      对 v0.1 的评审：12 个硬伤 + 证据 + 修法
-│   └── 01-NexusOS-Design-v0.2.md 设计定稿
-├── install/nexus-bootstrap      幂等安装器
+│   ├── 00-DESIGN-REVIEW.md        对 v0.1 的评审：12 个硬伤 + 证据 + 修法
+│   ├── 01-NexusOS-Design-v0.2.md  设计定稿
+│   ├── 02-DELIVERY-REPORT.md      实装验证报告
+│   └── 03-RELEASE-MODEL.md        发布模型（学 Omarchy 的六条机制）
+├── install/nexus-bootstrap    幂等安装器
+├── bin/
+│   ├── nexus-release          发布流水线
+│   └── nexus-install          单文件安装器
+├── packaging/
+│   ├── make-tarball.sh        tarball 产物
+│   └── make-deb.sh            deb 产物
+├── migrations/                配置迁移脚本
 ├── src/nexus/
 │   ├── config.py    路径、两级配置合并、TOML 读写
 │   ├── layering.py  分层管理（symlink / overlayfs 双后端）
@@ -182,8 +265,12 @@ nexusOS/
 │   ├── events.py    事件总线（规则引擎 + 诊断派发）
 │   ├── doctor.py    事实快照构建器
 │   ├── audit.py     审计
+│   ├── version.py   版本与通道
+│   ├── update.py    迁移执行 + 更新流程
 │   └── cli.py       对话式控制面
-└── systemd/nexus-*.service      systemd --user 单元
+├── systemd/nexus-*.service    systemd 单元
+├── tests/selftest.sh          20 项自检
+└── .github/workflows/         CI + Release
 ```
 
 ---

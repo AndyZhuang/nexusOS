@@ -34,6 +34,24 @@ bash install/nexus-bootstrap  # 幂等安装 + 重启用户单元
 改了 `src/nexus/` 之后必须重跑 bootstrap —— 运行的是 `~/.local/share/nexus/base/lib/` 里的副本，
 不是源码树。
 
+自检断言要**注入状态**而不是依赖本机实时负载：
+显存适配判定用 `GpuState(total_mb=..., used_mb=...)` 构造假状态来测，
+否则 Windows 侧一停掉 GPU 进程，断言就会假失败（2026-10-23 踩过）。
+
+## 发布
+
+```bash
+bash bin/nexus-release check     # 前置检查
+bash bin/nexus-release release   # build → test → sign → verify → upload
+```
+
+- 版本号在 `VERSION`；通道在 `nexus channel set stable|rc|edge|dev`
+- **配置演进走 `migrations/<Unix时间戳>.sh`**，幂等、每用户只跑一次；
+  迁移失败必须中止更新（与 Omarchy 的"失败不中断"有意分歧，见 docs/03-RELEASE-MODEL.md §1.3）
+- 改基底前必须先 `layering.snapshot("pre-update")` 作为回滚点
+- 产物：`packaging/make-tarball.sh`（rootless）与 `packaging/make-deb.sh`（系统级）
+- 改了 `src/nexus/` 或 `systemd/` 之后要重新跑 bootstrap 并提交
+
 ## 已知陷阱（别再踩）
 
 - `dumps_toml` 自己写的，只支持 dict / list[dict] / 标量三类；字符串列表会被当标量处理。
