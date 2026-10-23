@@ -23,7 +23,7 @@ REPO_SLUG="${NEXUS_REPO:-AndyZhuang/nexusOS}"
 BASE="${NEXUS_BASE_URL:-https://github.com/$REPO_SLUG/releases/download}"
 
 say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
-die() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
+die() { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
 command -v python3 >/dev/null 2>&1 || die "需要 python3 (3.11+)"
 python3 -c "import sys; assert sys.version_info>=(3,11)" 2>/dev/null \
@@ -110,6 +110,8 @@ cat <<EOF
 
     nexus status        系统总览
     nexus gpu           显存与模型
+    nexus permissions   权限档位
+    nexus               新手引导
     nexus "<自然语言>"   对话式控制面
     nexus update        更新（唯一受支持的入口）
     nexus channel list  发布通道
