@@ -1,0 +1,15 @@
+[Unit]
+Description=NexusOS GPU broker (VRAM arbitration daemon)
+After=default.target
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=__BASE_LIB__
+Environment=NEXUS_DATA_HOME=__NEXUS_DATA__
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__PYTHON__ -m nexus.broker --daemon
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

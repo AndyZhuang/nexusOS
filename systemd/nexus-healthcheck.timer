@@ -1,0 +1,10 @@
+[Unit]
+Description=NexusOS periodic health snapshot
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

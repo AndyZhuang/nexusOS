@@ -1,0 +1,15 @@
+[Unit]
+Description=NexusOS AI gateway (OpenAI-compatible facade)
+After=network.target
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=__BASE_LIB__
+Environment=NEXUS_DATA_HOME=__NEXUS_DATA__
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__PYTHON__ -m nexus.cli gateway --host 127.0.0.1 --port 8080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

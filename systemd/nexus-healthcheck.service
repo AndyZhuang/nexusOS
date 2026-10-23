@@ -1,0 +1,8 @@
+[Unit]
+Description=NexusOS health snapshot
+
+[Service]
+Type=oneshot
+Environment=PYTHONPATH=__BASE_LIB__
+Environment=NEXUS_DATA_HOME=__NEXUS_DATA__
+ExecStart=__PYTHON__ -m nexus.cli doctor --json

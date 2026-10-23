@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: '发布通道 (stable/rc/edge)'
+        required: true
+        default: 'stable'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装构建依赖
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev
+
+      - name: 前置检查
+        run: bash bin/nexus-release check
+
+      - name: 打包 tarball
+        run: bash packaging/make-tarball.sh
+
+      - name: 打包 deb
+        run: bash packaging/make-deb.sh
+
+      - name: 生成校验和
+        run: |
+          cd release
+          sha256sum *.tar.gz *.deb > SHA256SUMS
+
+      - name: 导入 GPG 密钥
+        uses: crazy-max/ghaction-import-gpg@v6
+        id: import_gpg
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.PASSPHRASE }}
+
+      - name: 签名
+        if: ${{ steps.import_gpg.outputs.success == 'true' }}
+        run: |
+          cd release
+          for f in *.tar.gz *.deb; do
+            gpg --batch --yes --armor --detach-sign --output "$f.sig" "$f"
+          done
+          gpg --armor --export "${{ secrets.GPG_KEY_ID }}" > nexusos.pub
+
+      - name: 发布到 GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd release
+          TAG="${GITHUB_REF_NAME}"
+          [ -n "$TAG" ] || TAG="v$(cat ../VERSION)"
+          gh release create "$TAG" \
+            *.tar.gz *.tar.gz.sha256 *.deb SHA256SUMS \
+            ${GPG_AVAILABLE:+*.sig} \
+            --title "NexusOS $TAG" \
+            --generate-notes
+          gh release upload "$TAG" nexusos.pub --clobber || true
+
+      - name: 发布说明
+        run: |
+          {
+            echo "## NexusOS $VERSION"
+            echo
+            sed -n '1,40p' CHANGELOG.md 2>/dev/null || echo "（无 CHANGELOG）"
+          } > release/NOTES.md
+          echo "notes written"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexusos-release
+          path: release/*
+          retention-days: 30

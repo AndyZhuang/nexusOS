@@ -1,0 +1,15 @@
+[Unit]
+Description=NexusOS event router (systemd events -> agent diagnosis)
+After=default.target
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=__BASE_LIB__
+Environment=NEXUS_DATA_HOME=__NEXUS_DATA__
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__PYTHON__ -m nexus.events
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

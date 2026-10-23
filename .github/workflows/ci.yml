@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 语法检查
+        run: python3 -m compileall -q src/nexus
+
+      - name: 单元自检
+        run: |
+          # 自检套件里有一部分依赖本机 GPU/WSL，这里只跑不依赖硬件的部分
+          python3 - <<'PY'
+          import sys, pathlib
+          sys.path.insert(0, "src")
+          from nexus.registry import Registry, discover_from_store
+          from nexus.mcp import ToolRegistry, Policy, MCPServer
+          from nexus.agent import parse_tool_call, resolve_tool_name
+          from nexus.version import check_version_order
+
+          # 1) 工具注册表
+          tools = ToolRegistry(Policy())
+          names = {t["name"] for t in tools.list_tools()}
+          assert len(names) >= 20, f"工具太少: {len(names)}"
+          for expect in ("fs.read", "fs.write", "gpu.snapshot", "sysd.list", "journal.query"):
+              assert expect in names, f"缺工具 {expect}"
+
+          # 2) MCP 协议往返
+          srv = MCPServer()
+          r = srv.handle({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})
+          assert r["result"]["serverInfo"]["name"] == "nexus-mcp"
+          r = srv.handle({"jsonrpc":"2.0","id":2,"method":"tools/list"})
+          assert len(r["result"]["tools"]) == len(names)
+          r = srv.handle({"jsonrpc":"2.0","id":3,"method":"tools/call",
+                          "params":{"name":"gpu.snapshot","arguments":{}}})
+          assert r["result"]["isError"] is False, r
+
+          # 3) 工具名解析（含模型常见的简写）
+          valid = names
+          assert resolve_tool_name("gpu.snapshot", valid) == "gpu.snapshot"
+          assert resolve_tool_name("gpu", valid) == "gpu.snapshot"
+          assert resolve_tool_name("gpu.m", valid) == "gpu.models"
+          assert resolve_tool_name("nope", valid) is None
+
+          # 4) 工具调用解析（含零宽字符）
+          assert parse_tool_call('<tool_call>{"name":"gpu.snapshot","arguments":{}}</tool_call>', valid)
+          zwsp = "<\u200btool_call>" + '{"name":"gpu.models","arguments":{}}' + "<\u200btool_call>"
+          assert parse_tool_call(zwsp, valid) == ("gpu.models", {}), "零宽字符未清洗"
+          fence = '```json\n{"name":"gpu.snapshot","arguments":{}}\n```'
+          assert parse_tool_call(fence, valid) == ("gpu.snapshot", {})
+
+          # 5) 版本比较
+          assert check_version_order("0.2.0", "0.10.0") < 0
+          assert check_version_order("1.0.0", "1.0.0-rc1") > 0
+          assert check_version_order("1.2.3", "1.2.3") == 0
+
+          # 6) 注册表合并（两级配置）
+          from nexus.config import _deep_merge
+          merged = _deep_merge({"model":[{"name":"a","vram_mb":1}]},
+                               {"model":[{"name":"b","vram_mb":2}]})
+          assert {m["name"] for m in merged["model"]} == {"a","b"}, merged
+
+          print("所有断言通过")
+          PY
+
+      - name: 打包产物
+        run: bash packaging/make-tarball.sh
+
+      - name: 校验和
+        run: |
+          cd release
+          sha256sum -c nexusos-*.tar.gz.sha256
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexusos-tarball
+          path: release/*.tar.gz*
+          retention-days: 7

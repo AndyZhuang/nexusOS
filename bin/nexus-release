@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# NexusOS 发布流水线。
+#
+# 分层设计（学习 Omarchy 的 omarchy-iso-release）：每个动作独立可组合，
+# release = build → test → sign → verify → upload 串起来。
+#
+#   ./bin/nexus-release build              打包产物 + sha256
+#   ./bin/nexus-release test               跑自检套件
+#   ./bin/nexus-release sign [GPG_USER]    GPG detached 签名
+#   ./bin/nexus-release verify             校验 sha256 + 签名
+#   ./bin/nexus-release upload             上传（gh release / rclone / scp）
+#   ./bin/nexus-release release [VERSION]  全流程
+#   ./bin/nexus-release check              检查发布前置条件
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+OUT="${NEXUS_RELEASE_DIR:-$REPO/release}"
+VERSION="$(tr -d '[:space:]' < "$REPO/VERSION")"
+NAME="nexusos-$VERSION"
+TARBALL="$OUT/$NAME.tar.gz"
+
+say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
+ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
+die()  { printf '  \033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
+
+cmd_build() {
+  say "构建产物 $NAME"
+  mkdir -p "$OUT"
+  bash "$REPO/packaging/make-tarball.sh" "$OUT"
+  ok "产物就绪: $TARBALL"
+}
+
+cmd_test() {
+  say "运行自检套件"
+  if [ ! -x "$REPO/tests/selftest.sh" ] && [ ! -f "$REPO/tests/selftest.sh" ]; then
+    die "找不到 tests/selftest.sh"
+  fi
+  bash "$REPO/tests/selftest.sh" || die "自检未通过，拒绝发布"
+  ok "自检通过"
+}
+
+cmd_sign() {
+  local user="${1:-}"
+  say "签名 $TARBALL"
+  command -v gpg >/dev/null 2>&1 || die "未找到 gpg"
+  [ -f "$TARBALL" ] || die "先执行 build"
+  if [ -n "$user" ]; then
+    gpg --local-user "$user" --detach-sign --armor --output "$TARBALL.sig" "$TARBALL"
+  else
+    gpg --detach-sign --armor --output "$TARBALL.sig" "$TARBALL"
+  fi
+  gpg --output "$TARBALL.pub" --armor --export
+  ok "签名完成: $TARBALL.sig"
+}
+
+cmd_verify() {
+  say "校验产物"
+  [ -f "$TARBALL" ] || die "产物不存在，先执行 build"
+  ( cd "$OUT" && sha256sum -c "$NAME.tar.gz.sha256" ) || die "sha256 校验失败"
+  ok "sha256 通过"
+  if [ -f "$TARBALL.sig" ] && command -v gpg >/dev/null 2>&1; then
+    gpg --verify "$TARBALL.sig" "$TARBALL" 2>/dev/null || die "GPG 签名校验失败"
+    ok "GPG 签名通过"
+  else
+    warn "没有签名文件，跳过签名校验"
+  fi
+}
+
+cmd_upload() {
+  say "上传产物"
+  [ -f "$TARBALL" ] || die "产物不存在，先执行 build"
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    TAG="v${VERSION}"
+    gh release create "$TAG" "$TARBALL" "$TARBALL.sha256" \
+      ${TARBALL.sig:+"$TARBALL.sig"} \
+      --title "NexusOS $VERSION" --generate-notes || die "gh release create 失败"
+    ok "已发布 GitHub Release $TAG"
+  elif command -v rclone >/dev/null 2>&1; then
+    rclone copy "$TARBALL" "${NEXUS_RCLONE_DEST:?需设置 NEXUS_RCLONE_DEST}"
+    rclone copy "$TARBALL.sha256" "${NEXUS_RCLONE_DEST:?需设置 NEXUS_RCLONE_DEST}"
+    ok "已上传到 rclone 目标"
+  else
+    warn "gh 未登录且无 rclone —— 产物留在 $OUT，请手动分发"
+    return 0
+  fi
+}
+
+cmd_check() {
+  say "发布前置检查"
+  local bad=0
+  [ -f "$REPO/VERSION" ] && ok "VERSION 存在" || { warn "缺 VERSION"; bad=1; }
+  [ -f "$REPO/CHANGELOG.md" ] && ok "CHANGELOG 存在" || { warn "缺 CHANGELOG"; bad=1; }
+  [ -f "$REPO/LICENSE" ] && ok "LICENSE 存在" || { warn "缺 LICENSE"; bad=1; }
+  git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 \
+    && ok "是 git 仓库" || { warn "不是 git 仓库"; bad=1; }
+  command -v gpg >/dev/null 2>&1 && ok "gpg 可用" || warn "无 gpg —— 无法签名"
+  command -v gh >/dev/null 2>&1 && ok "gh 可用" || warn "无 gh —— 无法发 GitHub Release"
+  python3 -c "import sys; assert sys.version_info>=(3,11), '需要 3.11+'" 2>/dev/null \
+    && ok "python3 >= 3.11" || { warn "python3 版本过低（需 3.11+）"; bad=1; }
+  [ "$bad" -eq 0 ] && ok "前置检查通过" || warn "存在缺失项"
+  return 0
+}
+
+cmd_release() {
+  cmd_check
+  cmd_build
+  cmd_test
+  cmd_sign || warn "签名跳过"
+  cmd_verify
+  cmd_upload
+  say "发布完成: $VERSION"
+}
+
+case "${1:-help}" in
+  build)   cmd_build ;;
+  test)    cmd_test ;;
+  sign)    shift; cmd_sign "${1:-}" ;;
+  verify)  cmd_verify ;;
+  upload)  cmd_upload ;;
+  check)   cmd_check ;;
+  release) cmd_release ;;
+  help|*)  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac

@@ -1,0 +1,25 @@
+[Unit]
+Description=NexusOS local inference backend (Ollama)
+Documentation=https://github.com/nexusos/nexus
+After=default.target
+
+[Service]
+Type=simple
+# 权重仓库：默认指向共享 store；bootstrap 可把常用模型 stage 到 ext4 加速
+Environment=OLLAMA_MODELS=__NEXUS_DATA__/ollama-models
+Environment=OLLAMA_HOST=127.0.0.1:11435
+# 30m 保活：模型常驻，避免每次交互都付加载代价
+Environment=OLLAMA_KEEP_ALIVE=30m
+# 原生独占闸门：同一时刻只允许一个模型驻留显存
+Environment=OLLAMA_MAX_LOADED_MODELS=1
+Environment=OLLAMA_NUM_PARALLEL=1
+Environment=OLLAMA_FLASH_ATTENTION=1
+Environment=OLLAMA_KV_CACHE_TYPE=q8_0
+Environment=OLLAMA_NOHISTORY=1
+ExecStart=/usr/local/bin/ollama serve
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# NexusOS bootstrap —— 幂等安装器（rootless）。
+#
+# 不写 /etc、不建 system unit、不装包。
+# 产物：$XDG_DATA_HOME/nexus（基底 + 可变层）、$XDG_CONFIG_HOME/nexus（配置）、
+#       ~/.local/bin/{nexus,nexus-mcp}、~/.config/systemd/user/nexus-*.service
+set -euo pipefail
+
+SELF="$(readlink -f "$0")"
+REPO="$(dirname "$(dirname "$SELF")")"
+SRC="$REPO/src"
+
+if [ ! -d "$SRC/nexus" ]; then
+  echo "找不到源码目录: $SRC/nexus" >&2
+  exit 1
+fi
+
+echo "== NexusOS bootstrap =="
+echo "  仓库: $REPO"
+echo "  数据: ${NEXUS_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/nexus}"
+echo "  配置: ${NEXUS_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/nexus}"
+
+PY=$(command -v python3 || true)
+if [ -z "$PY" ]; then
+  echo "需要 python3" >&2
+  exit 1
+fi
+echo "  python: $PY ($("$PY" -V 2>&1))"
+
+# systemd --user 可用性检查（rootless 架构的前提）
+if command -v systemctl >/dev/null 2>&1 && systemctl --user is-system-running >/dev/null 2>&1; then
+  echo "  systemd --user: 可用"
+else
+  echo "  !! systemd --user 不可用 —— 事件总线与常驻服务将无法启动" >&2
+fi
+
+# linger：保证用户实例在登出后仍运行
+if command -v loginctl >/dev/null 2>&1; then
+  loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q 'Linger=yes' \
+    && echo "  linger: 已启用" \
+    || echo "  linger: 未启用（执行 loginctl enable-linger $(id -un) 以开机自启）"
+fi
+
+export PYTHONPATH="$SRC${PYTHONPATH:+:$PYTHONPATH}"
+"$PY" -m nexus.install "$@"
+
+echo
+echo "== 完成 =="
+echo "  nexus status          # 系统总览"
+echo "  nexus gpu             # 显存与模型适配"
+echo "  nexus models list     # 模型注册表"
+echo "  nexus mcp test        # MCP 协议自检"
+echo "  nexus events test crash   # 事件→agent 诊断链路"
